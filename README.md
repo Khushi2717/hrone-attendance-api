@@ -1,26 +1,50 @@
-# Candidate kit
+# Employee Attendance & Analytics API
 
-Read in this order:
+FastAPI + MongoDB implementation of the HROne contract (`openapi.yaml`, `DATA_MODEL.md`, rules R1-R10).
+All application code is in `app/main.py`.
 
-1. `PROBLEM_STATEMENT.docx`: what you are asked to do, how it is evaluated.
-2. `openapi.yaml`: the API contract and the business rules (R1 - R10).
-3. `DATA_MODEL.md`: what is stored in MongoDB, with nine sample documents.
-4. `app/main.py`: the starter. Put **all** your code in this one file. It must start with `uvicorn app.main:app --port 8000`.
-5. `REVIEW.md`, `DECISIONS.md`: templates to fill in.
+## Run
+Prerequisites: Python 3.11+, MongoDB 6.0+ (local, Docker or Atlas).
 
-`sample_data/` holds the nine sample documents as MongoDB Extended JSON; `sample_seed.py` loads them. The grader's dataset is
-much larger and contains cases they do not show.
-
-## Local setup
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env            # set MONGO_URI / MONGO_DB (local docker: docker run -p 27017:27017 mongo:7)
-python sample_seed.py
-uvicorn app.main:app --port 8000 --reload
+cp .env.example .env              # or export MONGO_URI / MONGO_DB (environment variables win over .env)
+uvicorn app.main:app --port 8000
 ```
-MongoDB **6.0 or newer** is required (the grader uses 7.0). MongoDB Atlas free tier (M0) works.
+Swagger UI: http://localhost:8000/docs. Indexes are created at startup (idempotent; nothing is dropped or deleted).
 
-## Submit
-A public Git repository with `app/main.py`, `requirements.txt`, `REVIEW.md`, `DECISIONS.md` and a short `README.md`.
-No `.env`, no secrets, no Dockerfile.
+Load the 9 sample documents into a **disposable** database (this script empties both collections first):
+```bash
+MONGO_DB=attendance_sample python sample_seed.py
+```
+
+## Tests
+```bash
+pip install -r requirements-dev.txt
+pytest                                        # rule unit tests + CRUD tests (mongomock); integration tests skip without MongoDB
+TEST_MONGO_URI=mongodb://localhost:27017 pytest tests/test_integration.py -v      # needs a real MongoDB
+RUN_PERF=1 TEST_MONGO_URI=... pytest tests/test_integration.py -k 100k -s          # seeds ~100k docs, prints latencies
+```
+Integration tests create a randomly named database and drop it afterwards.
+
+## Endpoints
+All 12 are implemented: `GET /health`, `POST|GET /employees`, `POST /attendance/punch-in`, `POST /attendance/punch-out`,
+`GET /attendance`, `PATCH /attendance/{emp_code}/{date}`, `GET /analytics/employees/{emp_code}/monthly`,
+`GET /analytics/departments/summary`, `GET /analytics/leaderboard/late`, `GET /analytics/departments/{department}/trend`,
+`GET /admin/explain/{endpoint}`.
+
+## Verification status (be aware)
+The development sandbox had **no MongoDB** (and could not download one), so:
+- **Verified by running:** business rules R1-R5 and rounding, request validation (422s), CRUD, punch-in/out and
+  regularization state machine, history handling, pagination/sorting (mongomock), pipeline *shapes*.
+- **Written but NOT yet executed against a real MongoDB:** the five aggregation pipelines (monthly, department summary,
+  leaderboard, trend, and the explain endpoint), real concurrency behaviour, and the `IXSCAN`/no-`COLLSCAN` plans.
+  Tests for them exist in `tests/test_integration.py` with expected values worked out by hand; run them before submitting.
+
+## Interpretations
+- Trend range limit: 92 calendar days inclusive is allowed; 93 is 422.
+- Punch-out checks "already punched out" (409) before the 422 time checks.
+- Analytics read stored derived values and do not filter records by `joined_on`; they count every record in the month.
+- `moving_avg_7d` averages the *rounded* (4-decimal) daily rates, as the contract defines it over `attendance_rate` values.
+- Trend gap filling uses `$range` + `$unionWith` + `$group` rather than `$densify` (no dependence on `$densify` input behaviour).
