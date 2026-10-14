@@ -12,6 +12,16 @@ pip install -r requirements.txt
 cp .env.example .env              # or export MONGO_URI / MONGO_DB (environment variables win over .env)
 uvicorn app.main:app --port 8000
 ```
+On Windows (PowerShell):
+```powershell
+python -m venv .venv
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass   # allows the activation script in this window only
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+Copy-Item .env.example .env
+uvicorn app.main:app --port 8000
+```
+
 Swagger UI: http://localhost:8000/docs. Indexes are created at startup (idempotent; nothing is dropped or deleted).
 
 Load the 9 sample documents into a **disposable** database (this script empties both collections first):
