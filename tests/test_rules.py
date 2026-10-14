@@ -122,18 +122,18 @@ def test_count_weekdays():
 def test_parse_month_and_date_validation():
     assert m.parse_month("2026-02") == (date(2026, 2, 1), date(2026, 2, 28))
     for bad in ("2026-13", "2026-1", "0000-01"):
-        with pytest.raises(m.HTTPException):
+        with pytest.raises(m.RequestValidationError):
             m.parse_month(bad)
     for bad in ("2026-02-30", "20260201", "2026-2-1"):
-        with pytest.raises(m.HTTPException):
+        with pytest.raises(m.RequestValidationError):
             m.parse_date(bad)
 
 
 def test_trend_range_limits():
     assert m.parse_trend_range("2026-07-01", "2026-09-30")[1] == date(2026, 9, 30)  # 92 days inclusive
-    with pytest.raises(m.HTTPException):
+    with pytest.raises(m.RequestValidationError):
         m.parse_trend_range("2026-07-01", "2026-10-01")  # 93 days
-    with pytest.raises(m.HTTPException):
+    with pytest.raises(m.RequestValidationError):
         m.parse_trend_range("2026-07-02", "2026-07-01")
 
 

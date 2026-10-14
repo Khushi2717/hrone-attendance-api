@@ -31,3 +31,19 @@ starter endpoint against a database (no MongoDB was available in my environment;
 - Synchronous PyMongo inside plain `def` endpoints: FastAPI runs them in a thread pool, so requests are concurrent. Kept (no Motor).
 - The `IST` constant itself (UTC+05:30) is correct and reused.
 - Not-a-defect worth stating: the starter helpers are *not* reused as written (#1-#5); they were rewritten because their signatures hid the day/overnight context.
+
+## Issues found in my own implementation during the verification pass
+These are not starter defects; they were bugs or weak spots in my first version, found by the tests added afterwards.
+
+| # | What was wrong | How it was found | Fix |
+|---|---|---|---|
+| A | `GET /employees` and `GET /attendance` used `estimated_document_count()` for unfiltered totals. R10 says `total` must be exact, and that call reads metadata that can be stale. | Review of R10 against the code. | `count_documents(filter)` always (exact; costs one count per request, to be measured on a real server). |
+| B | Hand-raised 422s (date range, "changes nothing", 24 h rule, ...) returned `detail` as a string; the contract's `ValidationError` has `detail` as an array. | `tests/test_contract.py` (error-shape test). | `unprocessable()` raises `RequestValidationError` so the default FastAPI body is used everywhere. |
+| C | A no-op `PATCH` on a record whose *stored* derived values disagree with a recomputation returned 200 and wrote a history entry, because "changes nothing" was judged on all seven tracked fields. DATA_MODEL.md says stored derived values are authoritative and the seeded data may hold such records. | `tests/test_contract.py` + new regression test in `tests/test_api.py`. | "Changes nothing" is judged on the client-editable fields (`status`, `punch_in`, `punch_out`). A real edit still records every derived field that differs. |
+| D | My first concurrency tests (parallel requests) could not fail: removing the atomic guards from punch-out and regularize did not make them fail on the in-memory backend. They proved nothing about race safety. | Mutation check (guards deliberately removed). | Added `tests/test_race_windows.py`, which injects a competing write between the app's read and its write. With the guards removed 1-3 of its tests fail (4 mutants, all caught). The parallel tests are kept, but only the `real` backend can show MongoDB-level behaviour. |
+| E | Four wrong *test* expectations of mine (e.g. 09:28-19:10 is 9.70 h, not 9.69; overtime unchanged is correctly absent from `changes`). | Failing tests whose application behaviour was right. | Corrected the tests, not the app. Hand-computed analytics values were additionally cross-checked with an independent oracle (`tests/oracle.py`). |
+| F | One survivor in mutation testing: nothing checked that `avg_work_hours` ignores `work_hours` stored on ABSENT/LEAVE records. | Mutation check. | Added test and random-data coverage; mutant now caught. |
+
+**Mutation testing** (deliberately breaking the pipelines and re-running the tests on the simulated backend): window size, no-log employees,
+weekend presence, limit-before-rank, headcount ignoring `joined_on`, half-down rounding, late `>= 0`, average over all statuses, `joined_on <` vs `<=`.
+All nine were caught after fix F. This shows the tests have teeth; it does not show the pipelines are accepted by a real MongoDB server.

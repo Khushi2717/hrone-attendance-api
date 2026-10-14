@@ -30,9 +30,10 @@ from typing import Annotated, Any, Literal, Optional
 from bson import json_util
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Path, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, StrictInt, field_validator, model_validator
-from pymongo import ASCENDING, DESCENDING, MongoClient, ReturnDocument
+from pymongo import ASCENDING, DESCENDING, IndexModel, MongoClient, ReturnDocument
 from pymongo.errors import ConnectionFailure, DuplicateKeyError, PyMongoError
 
 # --------------------------------------------------------------------------- #
@@ -155,26 +156,28 @@ EpochMs = Annotated[StrictInt, Field(ge=MIN_EPOCH_MS, le=MAX_EPOCH_MS)]
 ShiftTime = Annotated[str, Field(pattern=HHMM_PATTERN)]
 
 
-def unprocessable(message: str) -> HTTPException:
-    return HTTPException(status_code=422, detail=message)
+def unprocessable(message: str, *loc: str) -> RequestValidationError:
+    """A 422 in FastAPI's default body shape (`detail` is a list), as the contract's ValidationError requires,
+    for rules that pydantic cannot express (date ranges, state-dependent checks)."""
+    return RequestValidationError([{"type": "value_error", "loc": loc or ("body",), "msg": message}])
 
 
-def parse_date(value: str, name: str = "date") -> date:
+def parse_date(value: str, name: str = "date", where: str = "query") -> date:
     if not DATE_RE.match(value):
-        raise unprocessable(f"{name} must be YYYY-MM-DD")
+        raise unprocessable(f"{name} must be YYYY-MM-DD", where, name)
     try:
         return date.fromisoformat(value)
     except ValueError:
-        raise unprocessable(f"{name} is not a valid calendar date") from None
+        raise unprocessable(f"{name} is not a valid calendar date", where, name) from None
 
 
 def parse_month(value: str) -> tuple[date, date]:
     """YYYY-MM -> (first day, last day)."""
     if not re.match(MONTH_PATTERN, value):
-        raise unprocessable("month must be YYYY-MM")
+        raise unprocessable("month must be YYYY-MM", "query", "month")
     year, month = int(value[:4]), int(value[5:])
     if year < 1:
-        raise unprocessable("month is out of range")
+        raise unprocessable("month is out of range", "query", "month")
     return date(year, month, 1), date(year, month, calendar.monthrange(year, month)[1])
 
 
@@ -324,34 +327,39 @@ def get_employee_or_404(emp_code: str) -> dict:
 
 
 def count_matching(collection, flt: dict) -> int:
-    # An empty filter is answered from collection metadata instead of scanning ~100k documents.
-    return collection.estimated_document_count() if not flt else collection.count_documents(flt)
+    # R10: `total` must reflect the applied filters exactly. count_documents is exact (an empty filter
+    # included); estimated_document_count() reads metadata that can be stale, so it is not used.
+    return collection.count_documents(flt)
 
 
 # --------------------------------------------------------------------------- #
 # 5. Indexes and startup
 # --------------------------------------------------------------------------- #
 def ensure_indexes() -> None:
-    """Idempotent (create_index with an identical spec is a no-op). Never drops or deletes anything."""
-    # employees
-    db.employees.create_index([("emp_code", ASCENDING)], unique=True, name="uniq_emp_code")
-    # GET /employees?department=..  (sorted by emp_code); department lookups in analytics
-    db.employees.create_index([("department", ASCENDING), ("emp_code", ASCENDING)], name="dept_emp_code")
-    # trend headcount per day + department summary with a department filter (joined_on <= day)
-    db.employees.create_index([("department", ASCENDING), ("joined_on", ASCENDING)], name="dept_joined_on")
-    # department summary across all departments (joined_on <= end of month)
-    db.employees.create_index([("joined_on", ASCENDING)], name="joined_on")
-    # attendance_logs
-    # one record per (employee, day): punch-in race guard, monthly analytics, per-employee listing
-    db.attendance_logs.create_index([("emp_code", ASCENDING), ("date", ASCENDING)],
-                                    unique=True, name="uniq_emp_code_date")
-    # GET /attendance default sort (date desc, emp_code asc) + date-range scans for monthly analytics
-    db.attendance_logs.create_index([("date", DESCENDING), ("emp_code", ASCENDING)], name="date_desc_emp_code")
-    # GET /attendance?status=..  with the same sort
-    db.attendance_logs.create_index([("status", ASCENDING), ("date", DESCENDING), ("emp_code", ASCENDING)],
-                                    name="status_date_emp_code")
-    # punch-out: "most recent record of this employee with punch_in <= punched_at"
-    db.attendance_logs.create_index([("emp_code", ASCENDING), ("punch_in", DESCENDING)], name="emp_code_punch_in")
+    """Idempotent (an identical index spec is a no-op). Never drops or deletes anything.
+
+    One createIndexes call per collection: MongoDB builds all of a collection's missing indexes in a single pass over
+    the data, which keeps startup well inside the 20 s readiness window on a ~100k-document collection."""
+    db.employees.create_indexes([
+        # unique business key: concurrent duplicate creates -> one 201, the rest 409
+        IndexModel([("emp_code", ASCENDING)], unique=True, name="uniq_emp_code"),
+        # GET /employees?department=..  (sorted by emp_code); department lookups in analytics
+        IndexModel([("department", ASCENDING), ("emp_code", ASCENDING)], name="dept_emp_code"),
+        # trend headcount per day + department summary with a department filter (joined_on <= day)
+        IndexModel([("department", ASCENDING), ("joined_on", ASCENDING)], name="dept_joined_on"),
+        # department summary across all departments (joined_on <= end of month)
+        IndexModel([("joined_on", ASCENDING)], name="joined_on"),
+    ])
+    db.attendance_logs.create_indexes([
+        # one record per (employee, day): punch-in race guard, monthly analytics, per-employee listing
+        IndexModel([("emp_code", ASCENDING), ("date", ASCENDING)], unique=True, name="uniq_emp_code_date"),
+        # GET /attendance default sort (date desc, emp_code asc) + date-range scans for monthly analytics
+        IndexModel([("date", DESCENDING), ("emp_code", ASCENDING)], name="date_desc_emp_code"),
+        # GET /attendance?status=..  with the same sort
+        IndexModel([("status", ASCENDING), ("date", DESCENDING), ("emp_code", ASCENDING)], name="status_date_emp_code"),
+        # punch-out: "most recent record of this employee with punch_in <= punched_at"
+        IndexModel([("emp_code", ASCENDING), ("punch_in", DESCENDING)], name="emp_code_punch_in"),
+    ])
 
 
 def try_ensure_indexes() -> bool:
@@ -459,7 +467,7 @@ def build_attendance_filter(emp_code: Optional[str], date_from: Optional[str],
     start = parse_date(date_from, "date_from") if date_from is not None else None
     end = parse_date(date_to, "date_to") if date_to is not None else None
     if start and end and start > end:
-        raise unprocessable("date_from must not be after date_to")
+        raise unprocessable("date_from must not be after date_to", "query", "date_from")
     flt: dict = {}
     if emp_code is not None:
         flt["emp_code"] = emp_code
@@ -571,7 +579,10 @@ def plan_regularization(rec: dict, emp: dict, body: RegularizeRequest) -> tuple[
     new = {"status": status, "punch_in": final_in, "punch_out": final_out,
            **derive_fields(status, final_in, final_out, day, emp)}
     changes = {k: {"from": old[k], "to": new[k]} for k in TRACKED_FIELDS if old[k] != new[k]}
-    if not changes:
+    # "A request that changes nothing is 422" is judged on what the client can edit. Seeded records may carry
+    # stored derived values that differ from a recomputation; a no-op request must not rewrite them (and add a
+    # history entry) just because recomputing would disagree with what is stored.
+    if not any(k in changes for k in ("status", "punch_in", "punch_out")):
         raise unprocessable("request changes nothing")
     return new, changes
 
@@ -586,7 +597,7 @@ def history_length_filter(rec: dict) -> dict:
 @app.patch("/attendance/{emp_code}/{date}")
 def regularize(body: RegularizeRequest, emp_code: str,
                day_str: str = Path(alias="date")) -> dict:
-    parse_date(day_str)
+    parse_date(day_str, "date", "path")
     emp = get_employee_or_404(emp_code)
     for _ in range(REGULARIZE_MAX_ATTEMPTS):
         rec = db.attendance_logs.find_one({"emp_code": emp_code, "date": day_str})
@@ -803,9 +814,9 @@ def late_leaderboard(month: str = Query(pattern=MONTH_PATTERN), limit: int = Que
 def parse_trend_range(from_: str, to: str) -> tuple[date, date]:
     first, last = parse_date(from_, "from"), parse_date(to, "to")
     if last < first:
-        raise unprocessable("to must not be before from")
+        raise unprocessable("to must not be before from", "query", "to")
     if (last - first).days + 1 > MAX_TREND_DAYS:
-        raise unprocessable(f"range must not exceed {MAX_TREND_DAYS} days")
+        raise unprocessable(f"range must not exceed {MAX_TREND_DAYS} days", "query", "to")
     return first, last
 
 
@@ -835,7 +846,7 @@ ExplainTarget = Literal["attendance_list", "employee_monthly", "department_summa
 
 def require(value: Any, name: str) -> Any:
     if value is None:
-        raise unprocessable(f"{name} is required for this endpoint")
+        raise unprocessable(f"{name} is required for this endpoint", "query", name)
     return value
 
 
