@@ -2,7 +2,7 @@
 
 Review of the starter `app/main.py`. "Reproduced" means I ran the starter's helper function on the input shown
 (starter kept in git history). "By reading" means the defect follows directly from the code but I did not run the
-starter endpoint against a database (no MongoDB was available in my environment; see README "Verification status").
+starter endpoint against a database (the starter endpoints were never run against a database; my implementation was verified on a real MongoDB 8.2.7, see README "Verification status").
 
 | # | Where | What is wrong | How you'd notice it | Fix |
 |---|---|---|---|---|
@@ -46,4 +46,14 @@ These are not starter defects; they were bugs or weak spots in my first version,
 
 **Mutation testing** (deliberately breaking the pipelines and re-running the tests on the simulated backend): window size, no-log employees,
 weekend presence, limit-before-rank, headcount ignoring `joined_on`, half-down rounding, late `>= 0`, average over all statuses, `joined_on <` vs `<=`.
-All nine were caught after fix F. This shows the tests have teeth; it does not show the pipelines are accepted by a real MongoDB server.
+All nine were caught after fix F. This shows the tests have teeth; on its own it does not show the pipelines are accepted by a real MongoDB server; that was checked separately by running the real-server tests (75 passed on MongoDB 8.2.7, see README "Verification status").
+
+## Real-MongoDB verification pass (12-13 October 2026)
+Run on Windows 11, Python 3.14.4 and a local MongoDB 8.2.7 (no authentication), using throw-away databases only.
+
+- `pytest`: 178 passed, 0 failed, 1 skipped (the opt-in 100k test). `pytest -k real`: 75 passed.
+- No implementation defect was found by the real-server run, so no application code changed in this pass. The real server accepted all four aggregation pipelines and the explain endpoint, and the results matched the hand-computed and independent-oracle values.
+- One test file changed: `tests/test_explain_perf.py` now seeds 450 employees (105,395 attendance documents) instead of 300 (about 70,000), because the assignment targets about 100,000.
+- Explain plans at 105,395 documents: an index scan on the first stage of every pipeline, and every `$lookup` reported `collectionScans = 0` with its index named. Timings are in the README.
+- Observation, not a defect: the department summary is the slowest endpoint (626 ms at 105k records, 356 ms at 70k) because it does one index lookup per employee. Not changed.
+- Test-script limitation: the explain lines printed by the 100k test show `docsExamined=None` for the aggregation targets because that print code only reads the top level of the explain output. The `IXSCAN` / `COLLSCAN` assertions are unaffected; stage-level statistics were inspected separately with a throw-away script that is not committed.

@@ -50,7 +50,7 @@ def test_explain_and_latency_on_100k_records(real_db, capsys):
     import random
     rnd = random.Random(7)
     depts = ["Engineering", "Sales", "Support", "Finance", "Ops"]
-    emps = [h.emp(f"EMP{i:04d}", depts[i % 5], "2025-01-06") for i in range(1, 301)]
+    emps = [h.emp(f"EMP{i:04d}", depts[i % 5], "2025-01-06") for i in range(1, 451)]
     real_db.employees.insert_many(emps)
     logs, d0 = [], date(2026, 1, 1)
     for e in emps:

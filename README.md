@@ -35,18 +35,26 @@ All 12 are implemented: `GET /health`, `POST|GET /employees`, `POST /attendance/
 `GET /analytics/departments/summary`, `GET /analytics/leaderboard/late`, `GET /analytics/departments/{department}/trend`,
 `GET /admin/explain/{endpoint}`.
 
-## Verification status (please read)
-The environment I developed in had **no MongoDB** and could not download one, so nothing below was run against a real server.
+## Verification status
 
-| | Status |
+Verified by running, on 12-13 October 2026: Windows 11, Python 3.14.4, a real local MongoDB 8.2.7 (no authentication), using throw-away databases that were dropped afterwards.
+
+| Check | Result |
 |---|---|
-| Business rules R1-R5, rounding, calendar helpers, request validation, OpenAPI paths/params, response and error bodies vs the JSON Schemas in `openapi.yaml`, CRUD, punch-in/out/regularize state machine, history, pagination | **Run and passing** (102 tests pass; no failures) |
-| The 5 aggregation pipelines (monthly, department summary, leaderboard, trend; explain builds on them) | Run end to end through the real endpoints on a **simulator** I wrote (`tests/minimongo.py`), checked against an independent pure-Python oracle on hand-built and random data, and mutation-tested. A simulator is **not MongoDB**: it cannot show the server accepts the pipeline syntax. **Not yet run on a real server.** |
-| Race conditions | Deterministic "competing write between read and write" tests pass (they fail if the guards are removed). **Not run against real MongoDB concurrency.** |
-| Index creation: idempotent, no data loss, works over a pre-seeded DB | Passes on the simulator; the same tests run unchanged on a real server (not run) |
-| `IXSCAN` / no `COLLSCAN` for the 5 explain targets, latency at 100k records | **Not measured.** `tests/test_explain_perf.py` is written for it; no numbers are claimed. |
+| Full suite, `pytest` | 178 passed, 0 failed, 1 skipped (the opt-in 100k test, run separately below) |
+| Tests on the real server, `pytest -k real` | 75 passed: monthly, summary, leaderboard and trend results against hand-computed and independent-oracle values, contract-schema checks, index creation over pre-seeded data, parallel-request tests, race-window tests |
+| Explain endpoint, small data | passed: `IXSCAN` present and `COLLSCAN` absent for all 5 targets |
+| `RUN_PERF=1`, 105,395 attendance documents and 450 employees | passed. Best of 3 single requests, in-process, DB on the same machine: `GET /attendance` unfiltered (exact count) 70 ms, one month 14 ms, one employee 12 ms, status filter 16 ms; employee monthly 9 ms; department summary 626 ms; late leaderboard 107 ms; department trend (3 months) 286 ms |
+| Explain stage details at 105,395 documents | the first stage of every pipeline uses an index scan; every `$lookup` reported `collectionScans = 0` and named its index (`uniq_emp_code_date`, `uniq_emp_code`, `dept_joined_on`) |
+| Index creation over 105,395 existing documents | 1.91 s the first time, 0.00 s when run again (idempotent); the exact count afterwards matched the seeded total |
+| `uvicorn app.main:app --port 8000` against the real server | started, `GET /health` returned 200 `{"status":"ok"}`, Swagger UI listed all 12 endpoints |
 
-Run `TEST_MONGO_URI=... pytest -v` and the perf command above before relying on the last three rows.
+### Limits of this evidence
+- Timings are single requests on a laptop, not load tests. The department summary is the slowest because it does one index lookup per employee, so it grows with employee count and records.
+- The parallel-request tests passed on the real server, but a stress test cannot force a particular interleaving. The deterministic race-window tests inject a competing write between the application's read and write, which proves the guards (conditional updates, unique keys, retry), not MongoDB's own atomicity.
+- The data was synthetic. The grader's dataset was not available.
+- Only MongoDB 8.2.7 and Python 3.14.4 were run on the real server.
+- Swagger UI shows request schemas but no response schemas (no `response_model` is declared). Response bodies are checked against the schemas in `openapi.yaml` by `tests/test_contract.py`.
 
 ## Interpretations of the contract
 - Unfiltered and filtered list totals use `count_documents` (exact), not `estimated_document_count`.
